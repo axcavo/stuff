@@ -1,7 +1,7 @@
-from game_stuff.effects.effects import  EffectResult, Effect, load_effect, apply_effects
+from game_stuff.effects.effects import  EffectLedger, Effect, load_effect, apply_effects
 
 __all__ = [
-    "EffectResult",
+    "EffectLedger",
     "Effect",
     "load_effect",
     "apply_effects"
