@@ -1,136 +1,159 @@
-import json
+from abc import ABC, abstractmethod
 from collections import defaultdict
-from collections.abc import dict_keys
-from typing import Optional
+from typing import Iterator
 
-from game_stuff.helpers import OPERATION_MAP
+import _util
 
 
 class _LedgerEntry:
-    __slots__ = ('value', 'duration')
+    __slots__ = ('value', 'duration', 'effect_id')
 
-    def __init__(self, value: int, duration: int) -> None:
-        self.duration: int = duration
-        self.value: int = value
+    def __init__(self, value: int, duration: int, effect_id: str):
+        self.value = value
+        self.duration = duration
+        self.effect_id = effect_id
 
     def __repr__(self) -> str:
         return f"[value: {self.value}, duration: {self.duration}]"
 
 
 class EffectLedger:
-    __slots__ = '_data'
+    __slots__ = ('_data',)
 
-    def __init__(self, initial_data: Optional[dict[str, list[_LedgerEntry]]] = None) -> None:
-        self._data: defaultdict[str, list[_LedgerEntry]] = defaultdict(
-            list, initial_data or {}
-        )
+    def __init__(self) -> None:
+        self._data: defaultdict[str, list[_LedgerEntry]] = defaultdict(list)
+
+    def __repr__(self) -> str:
+        return repr(self._data)
 
     def __len__(self) -> int:
         return len(self._data)
 
-    def __contains__(self, attr: str) -> bool:
-        return attr in self._data
+    def __contains__(self, item) -> int:
+        return item in self._data
 
-    def __getitem__(self, attr: str) -> list[_LedgerEntry]:
-        return self._data[attr]
+    def __getitem__(self, item) -> list[_LedgerEntry]:
+        return self._data[item]
 
-    def __setitem__(self, attr: str, entries: list[_LedgerEntry]) -> None:
-        self._data[attr] = entries
+    def __setitem__(self, key, value) -> None:
+        self._data[key] = value
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[tuple[str, list[_LedgerEntry]]]:
         return iter(self._data.items())
 
-    def __repr__(self) -> str:
-        return repr(dict(self._data))
+    def put(self, effect_id: str, entry: _LedgerEntry) -> None:
+        self._data[effect_id].append(entry)
 
-    def __delitem__(self, attr):
-        self._data.__delitem__(attr)
+    def pop(self, effect_id: str) -> list[_LedgerEntry]:
+        return self._data.pop(effect_id)
 
-    def put(self, attr: str, entry: _LedgerEntry) -> None:
-        self._data[attr].append(entry)
+    def snapshot(self) -> list[tuple[str, list[_LedgerEntry]]]:
+        return list(self._data.items())
 
-    def keys(self) -> dict_keys:
-        return self._data.keys()
+
+class EffectValueProtocol(ABC):
+    identifier: str
+
+    def __init__(self) -> None:
+        if not hasattr(self, 'identifier'):
+            raise AttributeError("Protocol must define an identifier.")
+
+    def apply(self, entries: list[_LedgerEntry]) -> int:
+        return self._apply(entries)
+
+    @abstractmethod
+    def _apply(self, entries: list[_LedgerEntry]) -> int:
+        pass
+
+
+class EffectDurationProtocol(ABC):
+    identifier: str
+
+    def __init__(self) -> None:
+        if not hasattr(self, 'identifier'):
+            raise AttributeError("Protocol must define an identifier.")
+
+    def apply(self, entries: list[_LedgerEntry]) -> None:
+        return self._apply(entries)
+
+    @abstractmethod
+    def _apply(self, entries: list[_LedgerEntry]) -> None:
+        pass
+
+
+class EffectApplicationProtocol:
+    __slots__ = ('duration_protocol', 'value_protocol')
+
+    def __init__(self, duration_protocol: EffectDurationProtocol, value_protocol: EffectValueProtocol) -> None:
+        self.duration_protocol = duration_protocol
+        self.value_protocol = value_protocol
 
 
 class Effect:
-    __slots__ = ('identifier', 'target_attr', 'application_op', 'duration')
+    __slots__ = ('identifier', 'target_attr', 'appl_operator', 'duration')
 
-    def __init__(self, identifier: str, target_attr: str, application_op: str, duration: int = 1) -> None:
-        if application_op not in OPERATION_MAP:
-            raise ValueError(f"{application_op} is not a valid operator.")
+    def __init__(self, identifier: str, target_attr: str, appl_operator: str, duration: int):
+        if not appl_operator in _util.ARITHMETIC_OPERATOR_MAP:
+            raise AttributeError(f"Unknown arithmetic operator: {appl_operator}.")
 
-        self.identifier: str = identifier
-        self.target_attr: str = target_attr
-        self.application_op: str = application_op
-        self.duration: int = duration
+        self.identifier = identifier
+        self.target_attr = target_attr
+        self.appl_operator = appl_operator
+        self.duration = duration
 
-    def __call__(self, *, receiver: object, value: int, previous: Optional[EffectLedger] = None) -> EffectLedger:
-        if not hasattr(receiver, self.target_attr):
-            raise ValueError(f"Receiver lacks target attribute: '{self.target_attr}'.")
+    def preprare(self, value: int, duration: int | None = None) -> "PreparedEffect":
+        return PreparedEffect(effect=self, value=value, duration=duration or self.duration)
 
-        current_value = getattr(receiver, self.target_attr)
-        op_func = OPERATION_MAP[self.application_op]
-        value_change = int(op_func(current_value, value) - current_value)
 
-        data = _LedgerEntry(value_change, duration=self.duration)
+class PreparedEffect:
+    __slots__ = ('effect', 'value', 'duration')
 
+    def __init__(self, effect: Effect, value: int, duration: int):
+        self.effect = effect
+        self.value = value
+        self.duration = duration
+
+    def __call__(self, receiver: object, previous: EffectLedger | None = None) -> EffectLedger:
+        if not hasattr(receiver, self.effect.target_attr):
+            raise AttributeError(f"{receiver} is missing target attribute: '{self.effect.target_attr}'.")
+
+        total = _util.ARITHMETIC_OPERATOR_MAP[self.effect.appl_operator](
+            getattr(receiver, self.effect.target_attr), self.value
+        )
+        delta = int(total - getattr(receiver, self.effect.target_attr))
+
+        entry = _LedgerEntry(delta, self.duration, self.effect.identifier)
         ledger = previous or EffectLedger()
-        ledger.put(self.target_attr, data)
+        ledger.put(self.effect.target_attr, entry)
+
         return ledger
 
 
-def _tick_effect_ledger(ledger: EffectLedger) -> None:
-    for attr, entries in ledger:
-        for i in range(len(entries) - 1, -1, -1):
-            entries[i].duration -= 1
-            if entries[i].duration <= 0:
-                del entries[i]
+def resolve_effects(ledger: EffectLedger, context: dict[str, EffectApplicationProtocol]) -> dict[str, int]:
+    resolved = {}
+
+    for attr, entries in ledger.snapshot():
+        grouped = defaultdict(list)
+        for entry in entries:
+            grouped[entry.effect_id].append(entry)
+
+        total = 0
+        for effect_id, group in grouped.items():
+            protocol = context[effect_id]
+
+            total += protocol.value_protocol.apply(group)
+            protocol.duration_protocol.apply(group)
+
+        resolved[attr] = total
+
+        ledger[attr] = [entry for entry in entries if entry.duration > 0]
+        if not ledger[str]:
+            ledger.pop(attr)
+
+    return resolved
 
 
-def _del_empty_ledger_attrs(ledger: EffectLedger) -> None:
-    empty_attrs = tuple(attr for attr, entries in ledger if len(entries) == 0)
-
-    for attr in empty_attrs:
-        del ledger[attr]
-
-
-def apply_effects(ledger: EffectLedger, receiver: object) -> Optional[EffectLedger]:
-    for attr, entries in ledger:
-        delta = sum(entry.value for entry in entries)
-        current_value = getattr(receiver, attr)
-        setattr(receiver, attr, current_value + delta)
-
-    _tick_effect_ledger(ledger)
-    _del_empty_ledger_attrs(ledger)
-
-    return ledger if len(ledger) > 0 else None
-
-
-def load_effect(json_data: str) -> Effect:
-    primitive = json.loads(json_data)
-
-    if not isinstance(primitive, dict):
-        raise ValueError("Malformed effect definition: JSON must be an object.")
-
-    required_keys = set(Effect.__slots__)
-    if not required_keys.issubset(primitive.keys()):
-        raise ValueError(f"Malformed effect definition. Missing keys: {required_keys - primitive.keys()}")
-
-    effect_kwargs = {key: primitive[key] for key in required_keys}
-    return Effect(**effect_kwargs)
-
-
-if __name__ == "__main__":
-    def main():
-        entry = _LedgerEntry(5, 1)
-        ledger = EffectLedger({"xd": [entry]})
-
-        print(ledger)
-
-        _tick_effect_ledger(ledger)
-
-        print(ledger)
-
-
-    main()
+def apply_effects(receiver: object, resolved: dict[str, int]) -> None:
+    for attr, delta in resolved.items():
+        value = getattr(receiver, attr) + delta
+        setattr(receiver, attr, value)
