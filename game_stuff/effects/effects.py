@@ -3,6 +3,7 @@ from collections import defaultdict
 from typing import Iterator
 
 import _util
+from game_stuff.adapters.base import AccessAdapter
 
 
 class _LedgerEntry:
@@ -113,14 +114,14 @@ class PreparedEffect:
         self.value = value
         self.duration = duration
 
-    def __call__(self, receiver: object, previous: EffectLedger | None = None) -> EffectLedger:
-        if not hasattr(receiver, self.effect.target_attr):
-            raise AttributeError(f"{receiver} is missing target attribute: '{self.effect.target_attr}'.")
+    def __call__(self, receiver: object, access_adapter: AccessAdapter, previous: EffectLedger | None = None) -> EffectLedger:
+        if not access_adapter.contains(receiver, self.effect.target_attr):
+            raise ValueError(f"{receiver} is missing target_attr: '{self.effect.target_attr}'.")
 
         total = _util.ARITHMETIC_OPERATOR_MAP[self.effect.appl_operator](
-            getattr(receiver, self.effect.target_attr), self.value
+            access_adapter.get(receiver, self.effect.target_attr), self.value
         )
-        delta = int(total - getattr(receiver, self.effect.target_attr))
+        delta = int(total - access_adapter.get(receiver, self.effect.target_attr))
 
         entry = _LedgerEntry(delta, self.duration, self.effect.identifier)
         ledger = previous or EffectLedger()
@@ -147,7 +148,7 @@ def resolve_effects(ledger: EffectLedger, context: dict[str, EffectApplicationPr
         resolved[attr] = total
 
         ledger[attr] = [entry for entry in entries if entry.duration > 0]
-        if not ledger[str]:
+        if not ledger[attr]:
             ledger.pop(attr)
 
     return resolved
